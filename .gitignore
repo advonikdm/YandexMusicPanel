@@ -1,0 +1,6 @@
+# сборка и локальное состояние
+dist/
+build/
+*.spec
+__pycache__/
+config.json
