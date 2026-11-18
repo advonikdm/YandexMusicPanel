@@ -5,8 +5,8 @@
 гамма Яндекс Музыки. Панель без рамки, всегда в правом нижнем углу (можно
 перетащить мышью), справа по клику — контекстное меню.
 
-Готовый файл для установки: **[Releases](releases/latest) → `YandexMusicPanel.exe`**
-(18 МБ, Windows 10/11 x64, Python не нужен).
+Готовый файл для установки: **[YandexMusicPanel.exe (Releases)](https://github.com/advonikdm/YandexMusicPanel/releases/latest)**
+— 18 МБ, Windows 10/11 x64, Python не нужен.
 
 ## Файлы
 
@@ -21,7 +21,8 @@
 
 ## Установка на другой компьютер
 
-Один файл: `dist\YandexMusicPanel.exe` (нужна Windows 10/11 x64, Python не нужен).
+Один файл — `YandexMusicPanel.exe` из [Releases](https://github.com/advonikdm/YandexMusicPanel/releases/latest)
+(в репозитории его нет, при сборке он попадает в `dist\`). Нужна Windows 10/11 x64, Python не нужен.
 
 - Двойной клик (или запуск без параметров) = установка: файл копируется в
   `%LOCALAPPDATA%\YandexMusicPanel\`, в папку «Автозагрузка» кладётся
