@@ -8,16 +8,34 @@
 Готовый файл для установки: **[YandexMusicPanel.exe (Releases)](https://github.com/advonikdm/YandexMusicPanel/releases/latest)**
 — 18 МБ, Windows 10/11 x64, Python не нужен.
 
+![Панель](docs/screenshot.png)
+
+Так она выглядит при масштабе экрана 150 % (реальный размер окна — 322×81 пикселя).
+
 ## Файлы
 
-- `panel.py` — всё приложение (один файл, только стандартная библиотека + pywinrt;
-  PIL используется для обложек).
-- `config.json` — `scale` (1.5 = 150 %), `x`, `y` — положение окна.
-- `start-panel.vbs` — тихий запуск через `pythonw.exe` (без окна консоли).
-- `config.json` создаётся на месте (его нет в репозитории): положение окна и
-  масштаб свои у каждого компьютера.
-- `dist\YandexMusicPanel.exe` — собранный один файл (~19 МБ), его нет в репозитории:
-  он лежит в Releases. `build\` — временное для сборки (тоже не в репозитории).
+- `panel.py` — всё приложение: окно, SMTC, CDP-клиент для лайка и режимы установки.
+- `start-panel.vbs` — тихий запуск из исходников через `pythonw.exe` (без консоли).
+- `config.example.json` — образец настроек; рабочий `config.json` создаётся на месте
+  и в репозиторий не попадает (положение окна и масштаб у каждого свои).
+- `docs\screenshot.png` — картинка для этого README.
+- `panel.py` собирается в один `dist\YandexMusicPanel.exe` (~19 МБ); `dist\` и `build\`
+  в репозитории нет — готовый файл лежит в Releases.
+
+## Настройки (`config.json`)
+
+Лежит рядом с `panel.py` или рядом с `YandexMusicPanel.exe` (для установленного —
+в `%LOCALAPPDATA%\YandexMusicPanel\`). Все ключи необязательные:
+
+| ключ | что делает |
+| --- | --- |
+| `scale` | множитель размера панели; если ключа нет, подбирается по DPI экрана (144 → 1.5) |
+| `x`, `y` | положение окна в экранных пикселях; пишется, когда перетащишь панель мышью |
+| `cdp_port` | порт CDP для лайка, по умолчанию `9229` |
+
+Сбросить положение — контекстное меню панели (правый клик) → «Вернуть в правый нижний
+угол», либо удалить `config.json`. Менять масштаб вручную обычно не нужно.
+
 
 ## Установка на другой компьютер
 
@@ -37,15 +55,24 @@
   `--remote-debugging-port=9229` «Яндекс Музыке» — на новом компьютере это
   настраивается отдельно (см. выше).
 
-Собрать заново после правок в `panel.py`:
+## Запуск и сборка из исходников
+
+Только Windows x64, Python 3.10+ (проверено на 3.12):
+
+    pip install pillow winrt-Windows.Media.Control winrt-Windows.Storage.Streams
+    pythonw panel.py            # или start-panel.vbs
+
+Повторный запуск игнорируется — в системе мьютекс `ymcorner_panel_single`.
+Остановить: контекстное меню панели → «Выйти», либо закрыть процесс `pythonw.exe`,
+у которого в командной строке `panel.py`.
+
+Тот же один .exe после правок (`pip install pyinstaller`):
 
     python -m PyInstaller --noconfirm --clean --onefile --windowed ^
       --name YandexMusicPanel --distpath dist --workpath build --specpath build ^
       --collect-all winrt panel.py
 
-Запуск: `pythonw panel.py` (или `start-panel.vbs`). Повторный запуск
-игнорируется — в системе мьютекс `ymcorner_panel_single`. Остановить:
-завершить процесс `pythonw.exe`, у которого в командной строке `panel.py`.
+Обновить файл в релизе: `gh release upload v1.0 dist\YandexMusicPanel.exe --clobber`.
 
 ## Откуда данные и куда уходят команды
 
