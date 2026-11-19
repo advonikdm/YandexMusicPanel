@@ -5,7 +5,12 @@
 через системный медиа-интерфейс Windows (SMTC), поэтому работает и с
 приложением «Яндекс Музыка», и с музыкой в браузере.
 
-Запуск:  pythonw.exe panel.py
+Запуск:  pythonw.exe panel.py            панель один раз
+         pythonw.exe panel.py --watch    контролёр: панель вместе с приложением
+         python panel.py --install       включить автозапуск контролёра
+         python panel.py --version       версия
+
+Версия: 1.1 (установочный файл YandexMusicPanel-1.1.exe)
 """
 
 import asyncio
@@ -44,6 +49,7 @@ if getattr(sys, "frozen", False):        # собрано PyInstaller: данн�
 else:
     BASE = os.path.dirname(os.path.abspath(__file__))
 CONF = os.path.join(BASE, "config.json")
+PID_FILE = os.path.join(BASE, ".watch.pid")
 
 # ---------- цвета: палитра приложения Яндекс Музыка ----------
 # тёмный фон интерфейса + фирменный жёлтый #FFDB4F
@@ -89,6 +95,9 @@ kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD,
 
 VK_PREV, VK_PLAY_PAUSE, VK_NEXT = 0xB6, 0xB3, 0xB5
 
+PANEL_MUTEX = "ymcorner_panel_single"
+WATCH_MUTEX = "ymcorner_watch_single"
+
 
 def media_key(vk):
     """Глобальная медиа-клавиша (запасной вариант, если приложение
@@ -115,7 +124,8 @@ def fmt_time(td):
 
 def load_conf():
     try:
-        with open(CONF, "r", encoding="utf-8") as fh:
+        # utf-8-sig: файл могли сохранить в Блокноте с BOM
+        with open(CONF, "r", encoding="utf-8-sig") as fh:
             return json.load(fh)
     except Exception:
         return {}
@@ -472,12 +482,13 @@ class Panel:
             scale_y = 1.0
         x = self.cfg.get("x")
         y = self.cfg.get("y")
-        if x is None:
-            x = r - w - MARGIN
-        if y is None:
-            y = int(b * scale_y) - h - MARGIN
-        x = max(0, min(x, sw - w))
-        y = max(0, min(y, sh - h))
+        bx, by = r - w - MARGIN, int(b * scale_y) - h - MARGIN   # правый нижний угол
+        if (x is None or y is None
+                or not 0 <= int(x) <= sw - w or not 0 <= int(y) <= sh - h):
+            # позиции нет или она не влезает в этот экран (другой монитор) — в угол
+            x, y = bx, by
+        x = max(0, min(int(x), sw - w, max(0, bx)))
+        y = max(0, min(int(y), sh - h, max(0, by)))
         self.root.geometry("%dx%d+%d+%d" % (w, h, x, y))
         self.root.update_idletasks()
         if os.environ.get("YM_DEBUG"):
@@ -560,8 +571,9 @@ class Panel:
                                           save_conf(self.cfg), self._place()))
         menu.add_command(label="Перезапустить плеер с режимом для лайков",
                          command=self._ask_restart)
+        menu.add_command(label="Версия %s" % VERSION, state="disabled")
         menu.add_separator()
-        menu.add_command(label="Выйти", command=self.root.destroy)
+        menu.add_command(label="Выйти", command=self._quit)
         self.menu = menu
         cv.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
 
@@ -707,7 +719,15 @@ class Panel:
             self._drag = None
             self.cfg["x"] = self.root.winfo_x()
             self.cfg["y"] = self.root.winfo_y()
+            self.cfg.pop("stopped", None)
             save_conf(self.cfg)
+
+    def _quit(self):
+        """Выход по меню: контролёр не поднимет панель, пока приложение
+        не запустят заново (ключ stopped в config.json)."""
+        self.cfg["stopped"] = int(time.time())
+        save_conf(self.cfg)
+        self.root.destroy()
 
     def _seek(self, x):
         if not self.duration or self.smtc.sess is None:
@@ -855,10 +875,109 @@ def _now():
     return time.monotonic()
 
 
+# ---------- контролёр: панель вместе с приложением «Яндекс Музыка» ----------
+def _mutex_taken(name):
+    """True, если мьютекс уже принадлежит другому процессу."""
+    kern = ctypes.windll.kernel32
+    handle = kern.CreateMutexW(None, False, name)
+    taken = kern.GetLastError() == 183          # ERROR_ALREADY_EXISTS
+    if handle:
+        kern.CloseHandle(handle)
+    return taken
+
+
+def _hold_mutex(name):
+    """Занять мьютекс на всё время работы процесса; False, если он занят."""
+    kern = ctypes.windll.kernel32
+    kern.CreateMutexW(None, False, name)
+    return kern.GetLastError() != 183
+
+
+def panel_cmd():
+    """Чем запускать панель: собранный .exe или pythonw + panel.py."""
+    if getattr(sys, "frozen", False):
+        return [target_exe()]
+    py = sys.executable
+    if os.path.basename(py).lower() == "python.exe":
+        gui = os.path.join(os.path.dirname(py), "pythonw.exe")
+        if os.path.exists(gui):
+            py = gui
+    return [py, os.path.abspath(__file__)]
+
+
+def _write_pids(panel_pid=0):
+    """pid контролёра и панели — чтобы снять автозапуск точечно."""
+    try:
+        with open(PID_FILE, "w", encoding="ascii") as fh:
+            fh.write("%d %d\n" % (os.getpid(), panel_pid))
+    except OSError:
+        pass
+
+
+def kill_pids():
+    """Заккрыть контролёр и панель по pid-файлу (для исходников)."""
+    pids = []
+    try:
+        with open(PID_FILE, "r", encoding="ascii") as fh:
+            pids = [int(a) for a in fh.read().split() if a.isdigit()]
+    except OSError:
+        pass
+    for pid in pids:
+        if pid and pid != os.getpid():
+            subprocess.Popen(["taskkill", "/PID", str(pid), "/F"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        os.remove(PID_FILE)
+    except OSError:
+        pass
+
+
+def watch_ym(interval=3.0):
+    """Пока работает «Яндекс Музыка», работает и панель в правом нижнем углу.
+
+    Панель поднимается при запуске приложения и при падении панели; «Выйти»
+    в её меню гасит панель до следующего запуска приложения (ключ stopped).
+    Ключ require_ym=false в config.json — панель работает всегда.
+    Ключ disabled=true — контролёр закрывает панель и сам выходит.
+    """
+    _write_pids()
+    was = False
+    proc = None
+    while True:
+        try:
+            cfg = load_conf()
+            if cfg.get("disabled"):
+                if proc is not None and proc.poll() is None:
+                    proc.terminate()
+                try:
+                    os.remove(PID_FILE)
+                except OSError:
+                    pass
+                return
+            running = bool(ym_main_proc()[0])
+            if running and not was:              # приложение запустили заново
+                cfg.pop("stopped", None)
+                cfg.pop("disabled", None)
+                save_conf(cfg)
+            need = running or not cfg.get("require_ym", True)
+            if (need and not cfg.get("stopped")
+                    and (proc is None or proc.poll() is not None)
+                    and not _mutex_taken(PANEL_MUTEX)):
+                proc = subprocess.Popen(panel_cmd(), cwd=BASE,
+                                        creationflags=0x08000000)   # без окна
+                _write_pids(proc.pid)
+            was = running
+        except Exception:
+            pass
+        time.sleep(interval)
+
+
 # ---------- установка (для собранного одного .exe) ----------
 APP_NAME = "YandexMusicPanel"
-EXE_NAME = "YandexMusicPanel.exe"
-STARTUP_VBS = "YandexMusicPanel.vbs"
+VERSION = "1.1"                                  # номер и установочного файла, и панели
+EXE_NAME = "%s-%s.exe" % (APP_NAME, VERSION)     # YandexMusicPanel-1.1.exe
+LEGACY_EXE = "YandexMusicPanel.exe"              # имя установочного файла до 1.1
+STARTUP_VBS = "YandexMusicPanel.vbs"             # ярлык в «Автозагрузке», без номера
 
 
 def app_dir():
@@ -884,52 +1003,108 @@ def _same_path(a, b):
 
 
 def _silent():
-    """Без диалогов: YandexMusicPanel.exe --install --silent."""
+    """Без диалогов: YandexMusicPanel-<версия>.exe --install --silent."""
     return "--silent" in [a.lower() for a in sys.argv[1:]] or bool(os.environ.get("YM_SILENT"))
 
 
+def _vbs_run(argv):
+    """Содержимое .vbs из «Автозагрузки»: запуск без окна консоли.
+    Кавычки через Chr(34): иначе VBScript путается в вложенных кавычках."""
+    parts = ' & " " & '.join('Chr(34) & "%s" & Chr(34)' % a.replace('"', "")
+                             for a in argv)
+    return ('Set sh = CreateObject("WScript.Shell")\n'
+            'sh.Run %s, 0, False\n' % parts)
+
+
+def _drop_old_builds(dst):
+    """Закрыть и удалить ранее установленный .exe (другое имя версии)."""
+    keep = os.path.basename(dst).lower()
+    names = {LEGACY_EXE}
+    try:
+        for f in os.listdir(app_dir()):
+            if f.lower().startswith(APP_NAME.lower()) and f.lower().endswith(".exe"):
+                names.add(f)
+    except OSError:
+        pass
+    for name in names:
+        if name.lower() == keep:
+            continue
+        subprocess.Popen(["taskkill", "/IM", name, "/F"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            os.remove(os.path.join(app_dir(), name))
+        except OSError:
+            pass
+
+
 def install_self():
-    """Двойной клик по скачанному .exe: копирование в LOCALAPPDATA, автозапуск, старт."""
-    dst = target_exe()
-    if not _same_path(sys.executable, dst):
+    """Двойной клик: копирование .exe в LOCALAPPDATA, автозапуск, старт."""
+    dst_hint = target_exe() if getattr(sys, "frozen", False) else os.path.abspath(__file__)
+    if getattr(sys, "frozen", False):
+        dst = target_exe()
         os.makedirs(os.path.dirname(dst), exist_ok=True)
-        shutil.copy2(sys.executable, dst)
+        _drop_old_builds(dst)               # версия N уступает версии N+1
+        if not _same_path(sys.executable, dst):
+            shutil.copy2(sys.executable, dst)
     vbs = startup_file()
     try:
         os.makedirs(os.path.dirname(vbs), exist_ok=True)
-        with open(vbs, "w", encoding="ascii") as fh:
-            fh.write('Set sh = CreateObject("WScript.Shell")\n'
-                     'sh.Run """%s""", 0, False\n' % dst)
+        with open(vbs, "w", encoding="mbcs") as fh:
+            fh.write(_vbs_run(panel_cmd() + ["--watch"]))
         autostart = "включён" if os.path.exists(vbs) else "не удалось включить"
     except OSError:
         autostart = "не удалось включить (%s)" % vbs
-    subprocess.Popen([dst], cwd=os.path.dirname(dst))
+    cfg = load_conf()
+    cfg.pop("disabled", None)
+    cfg.pop("stopped", None)
+    save_conf(cfg)
+    subprocess.Popen(panel_cmd() + ["--watch"], cwd=BASE,
+                     creationflags=0x08000000)
     if not _silent():
         messagebox.showinfo(
-            "Панель Яндекс Музыки",
-            "Панель установлена:\n  %s\n\nАвтозапуск при входе в Windows: %s\n\n"
-            "Удаление:  %s --uninstall" % (dst, autostart, EXE_NAME))
+            "Панель Яндекс Музыки %s" % VERSION,
+            "Панель %s установлена: она появляется сама, как только запущена "
+            "«Яндекс Музыка»,\nи держится в правом нижнем углу.\n\n"
+            "Файл:  %s\nАвтозапуск контролёра при входе в Windows: %s\n\n"
+            "Удаление:  %s --uninstall" % (VERSION, dst_hint, autostart, EXE_NAME))
 
 
 def uninstall_self():
-    """Снять автозапуск, закрыть панель и удалить её папку."""
+    """Снять автозапуск и закрыть панель; для собранного .exe — удалить папку."""
     if not _silent():
         if not messagebox.askyesno("Панель Яндекс Музыки",
-                                   "Удалить панель: снять автозапуск и удалить файлы?"):
+                                   "Удалить панель: снять автозапуск и закрыть её?"):
             return
-    # удаляем через отдельную команду: панель может удалять сама себя
+    cfg = load_conf()
+    cfg["disabled"] = True          # контролёр погасит панель и выйдет
+    save_conf(cfg)
+    kill_pids()
+    try:
+        os.remove(startup_file())
+    except OSError:
+        pass
+    if not getattr(sys, "frozen", False):
+        if not _silent():
+            messagebox.showinfo("Панель Яндекс Музыки",
+                                "Готово: автозапуск снят, панель закрыта. "
+                                "Исходники не тронуты.")
+        return
+    # удаляем папку установленной панели через отдельную команду:
+    # процесс может удалять сам себя
     import tempfile
-    folder, vbs = app_dir(), startup_file()
+    folder = app_dir()
     bat = os.path.join(tempfile.gettempdir(), "ympanel_uninstall.cmd")
+    kill = "".join('taskkill /IM "%s" /F >nul 2>&1\r\n' % n
+                   for n in (EXE_NAME, LEGACY_EXE))
     with open(bat, "w", encoding="ascii") as fh:
         fh.write("@echo off\r\ntimeout /t 5 /nobreak >nul\r\n"
-                 'taskkill /IM "%s" /F >nul 2>&1\r\n'
+                 "%s"
+                 'del /q /f "%s"\r\n'
                  'del /q /f "%s"\r\n'
                  'timeout /t 3 /nobreak >nul\r\n'
                  'rmdir /s /q "%s"\r\n'
-                 'timeout /t 3 /nobreak >nul\r\n'
-                 'rmdir /s /q "%s"\r\n'
-                 'del "%%~f0"\r\n' % (EXE_NAME, vbs, folder, folder))
+                 'del "%%~f0"\r\n'
+                 % (kill, startup_file(), os.path.join(folder, LEGACY_EXE), folder))
     subprocess.Popen(["cmd", "/c", bat],
                      creationflags=0x00000008 | 0x00000200)   # detached, new process group
     if not _silent():
@@ -942,15 +1117,30 @@ def main():
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
         pass
-    if getattr(sys, "frozen", False):     # собранная версия: режимы установки
-        arg = (sys.argv[1] if len(sys.argv) > 1 else "").lower()
-        if arg in ("--uninstall", "/uninstall", "-u"):
-            uninstall_self()
+    arg = (sys.argv[1] if len(sys.argv) > 1 else "").lower()
+    if arg in ("--version", "/version", "-v", "-version"):
+        if not getattr(sys, "frozen", False):
+            print("%s %s" % (APP_NAME, VERSION))
+        elif not _silent():
+            messagebox.showinfo("Панель Яндекс Музыки",
+                                "Версия %s\nФайл: %s" % (VERSION, target_exe()))
+        return
+    if arg in ("--uninstall", "/uninstall", "-u"):
+        uninstall_self()
+        return
+    if arg in ("--install", "-i"):
+        install_self()                # и для .exe, и для исходников
+        return
+    if getattr(sys, "frozen", False) and arg not in (
+            "--run", "-r", "--silent", "--watch", "-w") \
+            and not _same_path(sys.executable, target_exe()):
+        install_self()                # первый запуск скачанного файла = установка
+        return
+    if arg in ("--watch", "-w"):      # контролёр: панель вместе с приложением
+        if not _hold_mutex(WATCH_MUTEX):
             return
-        if arg in ("--install", "-i") or (arg not in ("--run", "-r", "--silent")
-                                          and not _same_path(sys.executable, target_exe())):
-            install_self()                # первый запуск скачанного файла = установка
-            return
+        watch_ym()
+        return
     if "scale" not in load_conf():
         try:
             dpi = ctypes.windll.user32.GetDpiForSystem()
@@ -959,8 +1149,7 @@ def main():
         cfg = load_conf()
         cfg["scale"] = round(max(1.0, dpi / 96.0), 2)
         save_conf(cfg)
-    mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "ymcorner_panel_single")
-    if ctypes.windll.kernel32.GetLastError() == 183:   # панель уже запущена
+    if not _hold_mutex(PANEL_MUTEX):     # панель уже запущена
         return
     Panel().root.mainloop()
 
